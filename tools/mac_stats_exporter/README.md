@@ -12,6 +12,8 @@ Metrics exposed at `/metrics`:
 - `oai_mac_tx_bytes{rnti}` / `oai_mac_rx_bytes{rnti}`
 - `oai_mac_tx_bps{rnti}` / `oai_mac_rx_bps{rnti}`
 
+Note: CQI/RI appears only if the gNB prints CSI reports in `nrMAC_stats.log`.
+
 ## Put the files on your Google Cloud VM (beginner friendly)
 
 You have two easy options:

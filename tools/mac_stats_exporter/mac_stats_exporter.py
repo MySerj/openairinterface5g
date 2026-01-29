@@ -35,10 +35,10 @@ class MacStatsExporter:
         self._last_ts = {}
         self._last_rates = {}
 
-        self._regex_cqi = re.compile(r"UE (?P<rnti>[0-9a-fA-F]{4}): CQI (?P<cqi>\d+), RI (?P<ri>\d+)")
-        self._regex_ul = re.compile(r"UE (?P<rnti>[0-9a-fA-F]{4}): ulsch_rounds .* BLER (?P<bler>[0-9.]+) .* SNR (?P<snr_int>\d+)\.(?P<snr_dec>\d+) dB")
-        self._regex_dl = re.compile(r"UE (?P<rnti>[0-9a-fA-F]{4}): dlsch_rounds .* BLER (?P<bler>[0-9.]+) ")
-        self._regex_mac = re.compile(r"UE (?P<rnti>[0-9a-fA-F]{4}): MAC:\s+TX\s+(?P<tx_bytes>\d+)\s+RX\s+(?P<rx_bytes>\d+)\s+bytes")
+        self._regex_cqi = re.compile(r"UE (?P<rnti>[0-9a-fA-F]+): CQI (?P<cqi>\d+), RI (?P<ri>\d+)")
+        self._regex_ul = re.compile(r"UE (?P<rnti>[0-9a-fA-F]+): ulsch_rounds .* BLER (?P<bler>[0-9.]+) .* SNR (?P<snr_int>\d+)\.(?P<snr_dec>\d+) dB")
+        self._regex_dl = re.compile(r"UE (?P<rnti>[0-9a-fA-F]+): dlsch_rounds .* BLER (?P<bler>[0-9.]+) ")
+        self._regex_mac = re.compile(r"UE (?P<rnti>[0-9a-fA-F]+): MAC:\s+TX\s+(?P<tx_bytes>\d+)\s+RX\s+(?P<rx_bytes>\d+)\s+bytes")
 
     def _read_log(self) -> str:
         try:
