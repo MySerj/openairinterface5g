@@ -1,108 +1,134 @@
-# OAI MAC Stats Exporter
+# LEASCH Model Export
 
-This small exporter reads `nrMAC_stats.log` and exposes key metrics (CQI, SNR, BLER, TX/RX bytes, throughput) for Prometheus/Grafana.
+This folder is a minimal handoff package for integrating the trained LEASCH offline scheduler into another codebase such as OpenAirInterface.
 
-## What you get
+It contains:
 
-Metrics exposed at `/metrics`:
-- `oai_mac_cqi{rnti}`
-- `oai_mac_ri{rnti}`
-- `oai_mac_snr_db{rnti}`
-- `oai_mac_dl_bler{rnti}` / `oai_mac_ul_bler{rnti}`
-- `oai_mac_tx_bytes{rnti}` / `oai_mac_rx_bytes{rnti}`
-- `oai_mac_tx_bps{rnti}` / `oai_mac_rx_bps{rnti}`
+- `leasch_offline_qnet_last.pth`
+  The exact offline checkpoint that was used in the testing pipeline run `OFFLINE_EVAL_LAST_LEASCH_OFFLINE_20260319T174638Z_*`.
+- `model.py`
+  Standalone model definition plus state-building and inference helpers.
+- `example_inference.py`
+  Minimal example of loading the checkpoint and running one forward pass.
+- `model_manifest.json`
+  Machine-readable model metadata and interface description.
+- `leasch_offline_qnet_last_weights.json`
+  Raw layer weights and biases exported to JSON for non-PyTorch integration.
 
-Note: CQI/RI appears only if the gNB prints CSI reports in `nrMAC_stats.log`.
+## Model Type
 
-## Put the files on your Google Cloud VM (beginner friendly)
+- Architecture: fully connected MLP
+- Input dimension: `8`
+- Hidden layers: `128`, `128`
+- Activations: `ReLU`
+- Output dimension: `4`
 
-You have two easy options:
+The network outputs one Q-value per UE.
 
-### Option A: Use WinSCP (Windows GUI)
-1. Open **WinSCP** and connect to your VM using SSH (same host/user/port you use in PuTTY/terminal).
-2. Navigate on the VM side to your repo, e.g.:
-   `/home/<your-user>/openairinterface5g`
-3. On your local machine, open the folder that contains `tools/mac_stats_exporter/`.
-4. Drag the **entire folder** `mac_stats_exporter` into:
-   `/home/<your-user>/openairinterface5g/tools/`
+## Input Contract
 
-This is safe; you’re just copying files into the repo folder.
+The model assumes exactly `4` candidate UEs. The input vector is always:
 
-### Option B: Use `scp` (command line)
-From your Windows terminal (PowerShell) or Linux terminal:
-```bash
-scp -r tools/mac_stats_exporter <your-user>@<VM-IP>:/home/<your-user>/openairinterface5g/tools/
+`[state_0, state_1, state_2, state_3, state_4, state_5, state_6, state_7]`
+
+with the following meaning:
+
+1. `state_0` = `d_hat_ue0`
+2. `state_1` = `d_hat_ue1`
+3. `state_2` = `d_hat_ue2`
+4. `state_3` = `d_hat_ue3`
+5. `state_4` = normalized fairness for `ue0`
+6. `state_5` = normalized fairness for `ue1`
+7. `state_6` = normalized fairness for `ue2`
+8. `state_7` = normalized fairness for `ue3`
+
+### Data-rate part `d_hat`
+
+For each UE:
+
+- start from reported `CQI` in `[0, 15]`
+- map `CQI -> spectral efficiency` using this fixed lookup table:
+
+```text
+[0.1523, 0.2344, 0.3770, 0.6016, 0.8770, 1.1758, 1.4766, 1.9141,
+ 2.4063, 2.7305, 3.3223, 3.9023, 4.5234, 5.1152, 5.5547, 5.8906]
 ```
 
-If your repo is in a different path, replace it accordingly.
+- normalize by the fixed global maximum `5.8906`
+- multiply by eligibility `g_u`:
 
-## Run exporter (same host as gNB)
+`d_hat_u = (CQI_TO_SE[cqi_u] / 5.8906) * eligibility_u`
 
-From the repo root:
-```bash
-./tools/mac_stats_exporter/mac_stats_exporter.py --log /path/to/nrMAC_stats.log --port 9109
+Eligibility is binary:
+
+- `0` = UE is not schedulable / no data
+- `1` = UE is schedulable
+
+So if a UE is not eligible, its first-half state feature is forced to `0`.
+
+### Fairness part
+
+The second half of the state is a normalized fairness-memory vector derived from raw counters:
+
+- raw fairness starts at `[0, 0, 0, 0]`
+- after a scheduling decision, the selected UE fairness counter is incremented by `1`
+- normalized fairness is:
+  - all zeros if `max(f_raw) == 0`
+  - otherwise `f_raw / max(f_raw)`
+
+This means each fairness feature is always in `[0, 1]`.
+
+## Output Contract
+
+The output is a length-4 vector of Q-values:
+
+- `output[0]` -> score for scheduling `UE 0`
+- `output[1]` -> score for scheduling `UE 1`
+- `output[2]` -> score for scheduling `UE 2`
+- `output[3]` -> score for scheduling `UE 3`
+
+Scheduling action:
+
+- choose `argmax(output)`
+- that index is the selected UE
+
+There is no softmax. These are raw Q-values, not probabilities.
+
+## Important Assumptions
+
+- Fixed number of UEs: exactly `4`
+- This checkpoint comes from the standalone offline LEASCH-style trainer, not from the Nokia simulator-coupled trainer
+- The state uses CQI-derived rates from the fixed lookup table above, not hidden exact channel spectral efficiency
+- The fairness vector is part of the input contract and must be maintained by the caller between scheduling decisions
+- The exported model only decides which one of the 4 UEs to schedule next
+
+## Minimal PyTorch Example
+
+```powershell
+python Codex/export/example_inference.py
 ```
 
-The gNB writes `nrMAC_stats.log` in the directory where you started `nr-softmodem`.
+Expected flow:
 
-## Run Prometheus + Grafana (optional)
+1. Build the 8D state from `cqi`, `eligibility`, and `fairness_raw`
+2. Load `leasch_offline_qnet_last.pth`
+3. Run one forward pass
+4. Select `argmax(q_values)` as the scheduling decision
 
-From `tools/mac_stats_exporter`:
-```bash
-docker compose up -d
-```
+## Minimal Integration Logic
 
-### How do I open Grafana if I only have SSH (no browser)?
+At each scheduling decision:
 
-Use an **SSH tunnel** so you can open the UI in your local browser.
+1. collect `CQI[4]`
+2. collect `eligibility[4]`
+3. keep `fairness_raw[4]` in scheduler state
+4. build the 8D input vector exactly as documented here
+5. run the MLP
+6. select the UE with the largest Q-value
+7. update fairness for the selected UE
 
-From your **local laptop** (not inside the VM):
-```bash
-ssh -L 3000:localhost:3000 -L 9090:localhost:9090 <your-user>@<VM-IP>
-```
+## Source Run
 
-Then open these URLs **on your local laptop browser**:
-- Grafana: http://localhost:3000  (user `admin`, pass `admin`)
-- Prometheus: http://localhost:9090
-
-You will see the graphs in your **local browser**, even though everything runs on the VM.
-
-If this does not work, make sure:
-1. You used the SSH tunnel command above.
-2. Docker containers are running: `docker compose ps`
-
-### If you prefer to open via public IP (not recommended)
-You can also expose the ports directly and open:
-```
-http://<VM-IP>:3000
-http://<VM-IP>:9090
-```
-But for this you must open firewall rules in Google Cloud (and it’s less secure).
-
-Open Grafana at: http://localhost:3000 (user `admin`, pass `admin`).
-
-Prometheus is at http://<VM-IP>:9090.
-
-### Quick Grafana panels
-
-Create a panel and use these PromQL examples:
-
-- CQI: `oai_mac_cqi`
-- Downlink throughput (bps): `oai_mac_tx_bps`
-- Uplink throughput (bps): `oai_mac_rx_bps`
-- UL SNR: `oai_mac_snr_db`
-- DL/UL BLER: `oai_mac_dl_bler`, `oai_mac_ul_bler`
-
-## Save a logfile after iperf
-
-You can export Prometheus data to CSV using the HTTP API. Example (last 5 minutes of downlink throughput):
-
-```bash
-curl -G "http://<VM-IP>:9090/api/v1/query_range" \
-  --data-urlencode 'query=oai_mac_tx_bps' \
-  --data-urlencode 'start=NOW-300s' \
-  --data-urlencode 'end=NOW' \
-  --data-urlencode 'step=1s' > tx_bps.json
-```
-
-Replace `NOW` with an RFC3339 timestamp if needed, e.g. `2025-02-01T12:00:00Z`.
+- training run id: `LEASCH_OFFLINE_20260319T174638Z`
+- exported checkpoint: `last`
+- test run that consumed this checkpoint: `OFFLINE_EVAL_LAST_LEASCH_OFFLINE_20260319T174638Z_*`
